@@ -1941,6 +1941,19 @@ static int vgic_its_save_ite(struct vgic_its *its, struct its_device *dev,
 	u32 next_offset;
 	u64 val;
 
+	/*
+	 * The collection this ITE pointed at may have been unmapped:
+	 * vgic_its_free_collection() sets ite->collection = NULL but leaves
+	 * the ITE in the ITT. Such an entry is UNPREDICTABLE and the restore
+	 * path rejects it (find_collection() returns NULL); saving it would
+	 * dereference a NULL collection and fault the host kernel. Persist it
+	 * as an invalid entry (PINTID == 0) so restore skips it.
+	 */
+	if (!ite->collection) {
+		val = 0;
+		return kvm_write_guest(kvm, gpa, &val, ite_esz);
+	}
+
 	next_offset = compute_next_eventid_offset(&dev->itt_head, ite);
 	val = ((u64)next_offset << KVM_ITS_ITE_NEXT_SHIFT) |
 	       ((u64)ite->irq->intid << KVM_ITS_ITE_PINTID_SHIFT) |
