@@ -1417,14 +1417,19 @@ static unsigned long vgic_mmio_read_its_baser(struct kvm *kvm,
 }
 
 #define GITS_BASER_RO_MASK	(GENMASK_ULL(52, 48) | GENMASK_ULL(58, 56))
+/* its lock must be held */
+static void vgic_its_free_device_list(struct kvm *kvm, struct vgic_its *its);
+static void vgic_its_free_collection_list(struct kvm *kvm, struct vgic_its *its);
+
 static void vgic_mmio_write_its_baser(struct kvm *kvm,
 				      struct vgic_its *its,
 				      gpa_t addr, unsigned int len,
 				      unsigned long val)
 {
 	const struct vgic_its_abi *abi = vgic_its_get_abi(its);
-	u64 entry_size, device_type;
+	u64 entry_size;
 	u64 reg, *regptr, clearbits = 0;
+	int type;
 
 	/* When GITS_CTLR.Enable is 1, we ignore write accesses. */
 	if (its->enabled)
@@ -1434,12 +1439,12 @@ static void vgic_mmio_write_its_baser(struct kvm *kvm,
 	case 0:
 		regptr = &its->baser_device_table;
 		entry_size = abi->dte_esz;
-		device_type = GITS_BASER_TYPE_DEVICE;
+		type = GITS_BASER_TYPE_DEVICE;
 		break;
 	case 1:
 		regptr = &its->baser_coll_table;
 		entry_size = abi->cte_esz;
-		device_type = GITS_BASER_TYPE_COLLECTION;
+		type = GITS_BASER_TYPE_COLLECTION;
 		clearbits = GITS_BASER_INDIRECT;
 		break;
 	default:
@@ -1451,10 +1456,28 @@ static void vgic_mmio_write_its_baser(struct kvm *kvm,
 	reg &= ~clearbits;
 
 	reg |= (entry_size - 1) << GITS_BASER_ENTRY_SIZE_SHIFT;
-	reg |= device_type << GITS_BASER_TYPE_SHIFT;
+	reg |= (u64)type << GITS_BASER_TYPE_SHIFT;
 	reg = vgic_sanitise_its_baser(reg);
 
 	*regptr = reg;
+
+	if (!(reg & GITS_BASER_VALID)) {
+		/* Take the its_lock to defend against shared->cached translation
+		 * change ... but we are in the write path, the device/collection
+		 * lists are only protected by its_lock. */
+		mutex_lock(&its->its_lock);
+		switch (type) {
+		case GITS_BASER_TYPE_DEVICE:
+			vgic_its_free_device_list(kvm, its);
+			break;
+		case GITS_BASER_TYPE_COLLECTION:
+			vgic_its_free_collection_list(kvm, its);
+			break;
+		default:
+			break;
+		}
+		mutex_unlock(&its->its_lock);
+	}
 }
 
 static unsigned long vgic_mmio_read_its_ctlr(struct kvm *vcpu,
@@ -1646,6 +1669,24 @@ static void vgic_its_free_device(struct kvm *kvm, struct its_device *dev)
 	kfree(dev);
 }
 
+/* its lock must be held */
+static void vgic_its_free_device_list(struct kvm *kvm, struct vgic_its *its)
+{
+	struct its_device *cur, *temp;
+
+	list_for_each_entry_safe(cur, temp, &its->device_list, dev_list)
+		vgic_its_free_device(kvm, cur);
+}
+
+/* its lock must be held */
+static void vgic_its_free_collection_list(struct kvm *kvm, struct vgic_its *its)
+{
+	struct its_collection *cur, *temp;
+
+	list_for_each_entry_safe(cur, temp, &its->collection_list, coll_list)
+		vgic_its_free_collection(its, cur->collection_id);
+}
+
 static void vgic_its_destroy(struct kvm_device *kvm_dev)
 {
 	struct kvm *kvm = kvm_dev->kvm;
@@ -1678,6 +1719,38 @@ static void vgic_its_destroy(struct kvm_device *kvm_dev)
 
 	kfree(its);
 	kfree(kvm_dev);/* alloc by kvm_ioctl_create_device, free by .destroy */
+}
+
+/* Reset the ITS device to its initial (post-create) state. */
+static void vgic_its_reset(struct kvm *kvm, struct vgic_its *its)
+{
+	its->baser_device_table &= ~GITS_BASER_VALID;
+	its->baser_coll_table &= ~GITS_BASER_VALID;
+	its->cbaser = 0;
+	its->creadr = 0;
+	its->cwriter = 0;
+	its->enabled = 0;
+
+	vgic_its_free_device_list(kvm, its);
+	vgic_its_free_collection_list(kvm, its);
+}
+
+static int vgic_its_ctrl(struct kvm *kvm, struct vgic_its *its, u64 attr)
+{
+	int ret = 0;
+
+	mutex_lock(&its->its_lock);
+	switch (attr) {
+	case KVM_DEV_ARM_ITS_CTRL_RESET:
+		vgic_its_reset(kvm, its);
+		break;
+	default:
+		ret = -ENXIO;
+		break;
+	}
+	mutex_unlock(&its->its_lock);
+
+	return ret;
 }
 
 int vgic_its_has_attr_regs(struct kvm_device *dev,
@@ -2399,6 +2472,8 @@ static int vgic_its_has_attr(struct kvm_device *dev,
 			return 0;
 		case KVM_DEV_ARM_ITS_RESTORE_TABLES:
 			return 0;
+		case KVM_DEV_ARM_ITS_CTRL_RESET:
+			return 0;
 		}
 		break;
 	case KVM_DEV_ARM_VGIC_GRP_ITS_REGS:
@@ -2443,6 +2518,8 @@ static int vgic_its_set_attr(struct kvm_device *dev,
 			return abi->save_tables(its);
 		case KVM_DEV_ARM_ITS_RESTORE_TABLES:
 			return abi->restore_tables(its);
+		case KVM_DEV_ARM_ITS_CTRL_RESET:
+			return vgic_its_ctrl(dev->kvm, its, attr->attr);
 		}
 	}
 	case KVM_DEV_ARM_VGIC_GRP_ITS_REGS: {
