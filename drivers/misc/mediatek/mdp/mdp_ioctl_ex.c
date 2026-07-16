@@ -143,7 +143,6 @@ struct mdp_job_mapping {
 	u32 mvas[MAX_HANDLE_NUM];
 	u32 handle_count;
 	void *node;
-	pid_t tgid;
 };
 static DEFINE_MUTEX(mdp_job_mapping_list_mutex);
 
@@ -156,43 +155,38 @@ static void mdp_job_mapping_free(struct mdp_job_mapping *mapping_job)
 	kfree(mapping_job);
 }
 
-/* Upper bound on jobs one process may keep outstanding (submitted but
- * not yet waited). Each job pins its buffers' IOVA until
- * mdp_ioctl_async_wait, so a producer submitting far ahead of its
- * consumer (e.g. codec postproc converting decode-ahead frames at
- * decode rate while the app consumes at display rate) exhausts the
- * MDP IOVA domain and every later mdp_ion_get_mva fails. Counted per
- * tgid, not per file node: clients fan jobs out over many fds.
+/* A buffer's IOVA mapping lives until its ion buffer is destroyed (the
+ * consumer's release), NOT until the MDP job completes, so job-based
+ * accounting cannot see the pressure: a producer converting decode-ahead
+ * frames maps one fresh buffer per frame and fills the shared 4GB
+ * multimedia domain in seconds, after which every mdp_ion_get_mva fails
+ * and the vendor postproc treats the -EINVAL as fatal (frozen video).
+ * Instead poll the domain's live usage (tracked in pseudo_m4u) and make
+ * submitters back off before the allocator is exhausted.
+ *
+ * Soft tier: above MDP_MM_DOM_SOFT_BYTES sleep up to
+ * MDP_MM_DOM_THROTTLE_MS, then submit anyway (no worse than today).
+ * Hard tier: above MDP_MM_DOM_HARD_BYTES keep sleeping (still
+ * signal-interruptible) - submitting there would fail imminently.
+ * Legit steady-state usage of the domain is a few hundred MB.
  */
-#define MDP_TGID_JOB_MAX	128
-#define MDP_TGID_THROTTLE_MS	1000
+#define MDP_MM_DOM_SOFT_BYTES	(2560ULL << 20)
+#define MDP_MM_DOM_HARD_BYTES	(3328ULL << 20)
+#define MDP_MM_DOM_THROTTLE_MS	1000
 
-static u32 mdp_job_count_by_tgid(pid_t tgid)
-{
-	struct mdp_job_mapping *mapping_job = NULL;
-	u32 count = 0;
-
-	mutex_lock(&mdp_job_mapping_list_mutex);
-	list_for_each_entry(mapping_job, &job_mapping_list, list_entry)
-		if (mapping_job->tgid == tgid)
-			count++;
-	mutex_unlock(&mdp_job_mapping_list_mutex);
-
-	return count;
-}
-
-static void mdp_throttle_job_by_tgid(pid_t tgid)
+static void mdp_throttle_mm_domain(void)
 {
 	unsigned long deadline = jiffies +
-		msecs_to_jiffies(MDP_TGID_THROTTLE_MS);
+		msecs_to_jiffies(MDP_MM_DOM_THROTTLE_MS);
+	unsigned long long usage;
 
-	while (mdp_job_count_by_tgid(tgid) >= MDP_TGID_JOB_MAX) {
-		if (time_after(jiffies, deadline)) {
-			CMDQ_ERR("%s tgid %d over %u jobs, submit anyway\n",
-				__func__, tgid, MDP_TGID_JOB_MAX);
+	while ((usage = m4u_mm_domain_usage()) > MDP_MM_DOM_SOFT_BYTES) {
+		if (usage < MDP_MM_DOM_HARD_BYTES &&
+			time_after(jiffies, deadline)) {
+			CMDQ_ERR("%s domain at %lluMB, submit anyway\n",
+				__func__, usage >> 20);
 			break;
 		}
-		/* soft cap: poll until async_wait/close drains the list */
 		if (msleep_interruptible(4))
 			break;
 	}
@@ -765,7 +759,7 @@ s32 mdp_ioctl_async_exec(struct file *pf, unsigned long param)
 	struct cmdq_command_buffer cmd_buf;
 	struct mdp_job_mapping *mapping_job = NULL;
 
-	mdp_throttle_job_by_tgid(current->tgid);
+	mdp_throttle_mm_domain();
 	/* exclude throttle time from the exec cost metric below */
 	exec_cost = sched_clock();
 
@@ -909,7 +903,6 @@ s32 mdp_ioctl_async_exec(struct file *pf, unsigned long param)
 	job_mapping_idx++;
 	mapping_job->job = handle;
 	mapping_job->node = pf->private_data;
-	mapping_job->tgid = current->tgid;
 	list_add_tail(&mapping_job->list_entry, &job_mapping_list);
 	mutex_unlock(&mdp_job_mapping_list_mutex);
 

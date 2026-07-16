@@ -20,6 +20,11 @@
 #endif
 #include <ion_priv.h>
 
+/* implemented in pseudo_m4u_v2.c: live byte usage of the shared
+ * multimedia IOVA domain that MDP ports allocate from
+ */
+unsigned long long m4u_mm_domain_usage(void);
+
 void mdp_ion_create(const char *name);
 void mdp_ion_destroy(void);
 int mdp_ion_get_mva(struct ion_handle *handle,
