@@ -144,6 +144,15 @@ struct mdp_job_mapping {
 };
 static DEFINE_MUTEX(mdp_job_mapping_list_mutex);
 
+static void mdp_job_mapping_free(struct mdp_job_mapping *mapping_job)
+{
+	u32 i;
+
+	for (i = 0; i < mapping_job->handle_count; i++)
+		mdp_ion_free_handle(mapping_job->handles[i]);
+	kfree(mapping_job);
+}
+
 #define SLOT_GROUP_NUM 64
 #define MAX_RB_SLOT_NUM (SLOT_GROUP_NUM*64)
 #define MAX_COUNT_IN_RB_SLOT 0x1000 /* 4KB */
@@ -804,7 +813,7 @@ s32 mdp_ioctl_async_exec(struct file *pf, unsigned long param)
 	if (status < 0) {
 		CMDQ_ERR("%s translate fail:%d\n", __func__, status);
 		cmdq_task_destroy(handle);
-		kfree(mapping_job);
+		mdp_job_mapping_free(mapping_job);
 		kfree(cmd_buf.va_base);
 		goto done;
 	}
@@ -813,14 +822,14 @@ s32 mdp_ioctl_async_exec(struct file *pf, unsigned long param)
 	if (status < 0) {
 		CMDQ_ERR("%s read_v1 fail:%d\n", __func__, status);
 		cmdq_task_destroy(handle);
-		kfree(mapping_job);
+		mdp_job_mapping_free(mapping_job);
 		kfree(cmd_buf.va_base);
 		goto done;
 	}
 
 	if (cmdq_handle_flush_cmd_buf(handle, &cmd_buf)) {
 		cmdq_task_destroy(handle);
-		kfree(mapping_job);
+		mdp_job_mapping_free(mapping_job);
 		kfree(cmd_buf.va_base);
 		status = -EFAULT;
 		goto done;
@@ -838,7 +847,7 @@ s32 mdp_ioctl_async_exec(struct file *pf, unsigned long param)
 			cmdq_mdp_unlock_thread(handle);
 #endif
 		cmdq_task_destroy(handle);
-		kfree(mapping_job);
+		mdp_job_mapping_free(mapping_job);
 		goto done;
 	}
 
