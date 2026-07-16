@@ -143,6 +143,7 @@ struct mdp_job_mapping {
 	u32 mvas[MAX_HANDLE_NUM];
 	u32 handle_count;
 	void *node;
+	pid_t tgid;
 };
 static DEFINE_MUTEX(mdp_job_mapping_list_mutex);
 
@@ -155,39 +156,40 @@ static void mdp_job_mapping_free(struct mdp_job_mapping *mapping_job)
 	kfree(mapping_job);
 }
 
-/* Upper bound on jobs one client may keep outstanding (submitted but
+/* Upper bound on jobs one process may keep outstanding (submitted but
  * not yet waited). Each job pins its buffers' IOVA until
  * mdp_ioctl_async_wait, so a producer submitting far ahead of its
  * consumer (e.g. codec postproc converting decode-ahead frames at
  * decode rate while the app consumes at display rate) exhausts the
- * MDP IOVA domain and every later mdp_ion_get_mva fails.
+ * MDP IOVA domain and every later mdp_ion_get_mva fails. Counted per
+ * tgid, not per file node: clients fan jobs out over many fds.
  */
-#define MDP_NODE_JOB_MAX	128
-#define MDP_NODE_THROTTLE_MS	1000
+#define MDP_TGID_JOB_MAX	128
+#define MDP_TGID_THROTTLE_MS	1000
 
-static u32 mdp_job_count_by_node(void *node)
+static u32 mdp_job_count_by_tgid(pid_t tgid)
 {
 	struct mdp_job_mapping *mapping_job = NULL;
 	u32 count = 0;
 
 	mutex_lock(&mdp_job_mapping_list_mutex);
 	list_for_each_entry(mapping_job, &job_mapping_list, list_entry)
-		if (mapping_job->node == node)
+		if (mapping_job->tgid == tgid)
 			count++;
 	mutex_unlock(&mdp_job_mapping_list_mutex);
 
 	return count;
 }
 
-static void mdp_throttle_job_by_node(void *node)
+static void mdp_throttle_job_by_tgid(pid_t tgid)
 {
 	unsigned long deadline = jiffies +
-		msecs_to_jiffies(MDP_NODE_THROTTLE_MS);
+		msecs_to_jiffies(MDP_TGID_THROTTLE_MS);
 
-	while (mdp_job_count_by_node(node) >= MDP_NODE_JOB_MAX) {
+	while (mdp_job_count_by_tgid(tgid) >= MDP_TGID_JOB_MAX) {
 		if (time_after(jiffies, deadline)) {
-			CMDQ_ERR("%s node %p over %u jobs, submit anyway\n",
-				__func__, node, MDP_NODE_JOB_MAX);
+			CMDQ_ERR("%s tgid %d over %u jobs, submit anyway\n",
+				__func__, tgid, MDP_TGID_JOB_MAX);
 			break;
 		}
 		/* soft cap: poll until async_wait/close drains the list */
@@ -763,7 +765,7 @@ s32 mdp_ioctl_async_exec(struct file *pf, unsigned long param)
 	struct cmdq_command_buffer cmd_buf;
 	struct mdp_job_mapping *mapping_job = NULL;
 
-	mdp_throttle_job_by_node(pf->private_data);
+	mdp_throttle_job_by_tgid(current->tgid);
 	/* exclude throttle time from the exec cost metric below */
 	exec_cost = sched_clock();
 
@@ -907,6 +909,7 @@ s32 mdp_ioctl_async_exec(struct file *pf, unsigned long param)
 	job_mapping_idx++;
 	mapping_job->job = handle;
 	mapping_job->node = pf->private_data;
+	mapping_job->tgid = current->tgid;
 	list_add_tail(&mapping_job->list_entry, &job_mapping_list);
 	mutex_unlock(&mdp_job_mapping_list_mutex);
 
