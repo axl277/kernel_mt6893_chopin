@@ -19,6 +19,8 @@
 #include <linux/vmalloc.h>
 #include <linux/spinlock.h>
 #include <linux/sched/clock.h>
+#include <linux/delay.h>
+#include <linux/jiffies.h>
 
 #ifdef CONFIG_MTK_CMDQ_MBOX_EXT
 #include "mdp_def.h"
@@ -151,6 +153,47 @@ static void mdp_job_mapping_free(struct mdp_job_mapping *mapping_job)
 	for (i = 0; i < mapping_job->handle_count; i++)
 		mdp_ion_free_handle(mapping_job->handles[i]);
 	kfree(mapping_job);
+}
+
+/* Upper bound on jobs one client may keep outstanding (submitted but
+ * not yet waited). Each job pins its buffers' IOVA until
+ * mdp_ioctl_async_wait, so a producer submitting far ahead of its
+ * consumer (e.g. codec postproc converting decode-ahead frames at
+ * decode rate while the app consumes at display rate) exhausts the
+ * MDP IOVA domain and every later mdp_ion_get_mva fails.
+ */
+#define MDP_NODE_JOB_MAX	128
+#define MDP_NODE_THROTTLE_MS	1000
+
+static u32 mdp_job_count_by_node(void *node)
+{
+	struct mdp_job_mapping *mapping_job = NULL;
+	u32 count = 0;
+
+	mutex_lock(&mdp_job_mapping_list_mutex);
+	list_for_each_entry(mapping_job, &job_mapping_list, list_entry)
+		if (mapping_job->node == node)
+			count++;
+	mutex_unlock(&mdp_job_mapping_list_mutex);
+
+	return count;
+}
+
+static void mdp_throttle_job_by_node(void *node)
+{
+	unsigned long deadline = jiffies +
+		msecs_to_jiffies(MDP_NODE_THROTTLE_MS);
+
+	while (mdp_job_count_by_node(node) >= MDP_NODE_JOB_MAX) {
+		if (time_after(jiffies, deadline)) {
+			CMDQ_ERR("%s node %p over %u jobs, submit anyway\n",
+				__func__, node, MDP_NODE_JOB_MAX);
+			break;
+		}
+		/* soft cap: poll until async_wait/close drains the list */
+		if (msleep_interruptible(4))
+			break;
+	}
 }
 
 #define SLOT_GROUP_NUM 64
@@ -719,6 +762,10 @@ s32 mdp_ioctl_async_exec(struct file *pf, unsigned long param)
 	u64 trans_cost = 0, exec_cost = sched_clock();
 	struct cmdq_command_buffer cmd_buf;
 	struct mdp_job_mapping *mapping_job = NULL;
+
+	mdp_throttle_job_by_node(pf->private_data);
+	/* exclude throttle time from the exec cost metric below */
+	exec_cost = sched_clock();
 
 	CMDQ_TRACE_FORCE_BEGIN("%s\n", __func__);
 
