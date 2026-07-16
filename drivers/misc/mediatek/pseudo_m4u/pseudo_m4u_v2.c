@@ -12,6 +12,7 @@
  */
 
 #include <linux/iommu.h>
+#include <linux/atomic.h>
 #include <linux/scatterlist.h>
 #include <linux/dma-mapping.h>
 #include <linux/dma-iommu.h>
@@ -65,6 +66,30 @@ static struct m4u_msg *m4u_dci_msg;
 static struct m4u_client_t *ion_m4u_client;
 int m4u_log_level = 2;
 int m4u_log_to_uart = 2;
+
+/* Live IOVA usage of the 0x2_0000_0000~0x2_ffff_ffff multimedia domain
+ * (MDP WROT/RDMA, VDEC postproc, OVL share it). A mapping lives until
+ * its ion buffer is destroyed, not until the MDP job completes, so a
+ * producer that maps one buffer per decoded frame can exhaust the
+ * domain; once full every later mdp_ion_get_mva fails and the vendor
+ * postproc treats the error as fatal. mdp_ioctl_async_exec polls this
+ * counter to back off before that happens.
+ */
+#define M4U_MM_DOM_START	0x200000000UL
+#define M4U_MM_DOM_END		0x2ffffffffUL
+static atomic64_t m4u_mm_dom_bytes = ATOMIC64_INIT(0);
+
+unsigned long long m4u_mm_domain_usage(void)
+{
+	return (unsigned long long)atomic64_read(&m4u_mm_dom_bytes);
+}
+EXPORT_SYMBOL(m4u_mm_domain_usage);
+
+static bool m4u_buf_in_mm_domain(struct m4u_buf_info_t *pList)
+{
+	return pList->mva >= M4U_MM_DOM_START &&
+	       pList->mva <= M4U_MM_DOM_END;
+}
 
 static LIST_HEAD(pseudo_sglist);
 /* this is the mutex lock to protect mva_sglist->list*/
@@ -1303,6 +1328,8 @@ static int pseudo_client_add_buf(struct m4u_client_t *client,
 {
 	mutex_lock(&(client->dataMutex));
 	list_add(&(pList->link), &(client->mvaList));
+	if (m4u_buf_in_mm_domain(pList))
+		atomic64_add(pList->size, &m4u_mm_dom_bytes);
 	mutex_unlock(&(client->dataMutex));
 
 	return 0;
@@ -1343,8 +1370,12 @@ static struct m4u_buf_info_t *pseudo_client_find_buf(
 	if (pListHead == &(client->mvaList)) {
 		ret = NULL;
 	} else {
-		if (del)
+		if (del) {
 			list_del(pListHead);
+			if (m4u_buf_in_mm_domain(pList))
+				atomic64_sub(pList->size,
+					     &m4u_mm_dom_bytes);
+		}
 		ret = pList;
 	}
 

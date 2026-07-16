@@ -19,6 +19,8 @@
 #include <linux/vmalloc.h>
 #include <linux/spinlock.h>
 #include <linux/sched/clock.h>
+#include <linux/delay.h>
+#include <linux/jiffies.h>
 
 #ifdef CONFIG_MTK_CMDQ_MBOX_EXT
 #include "mdp_def.h"
@@ -143,6 +145,52 @@ struct mdp_job_mapping {
 	void *node;
 };
 static DEFINE_MUTEX(mdp_job_mapping_list_mutex);
+
+static void mdp_job_mapping_free(struct mdp_job_mapping *mapping_job)
+{
+	u32 i;
+
+	for (i = 0; i < mapping_job->handle_count; i++)
+		mdp_ion_free_handle(mapping_job->handles[i]);
+	kfree(mapping_job);
+}
+
+/* A buffer's IOVA mapping lives until its ion buffer is destroyed (the
+ * consumer's release), NOT until the MDP job completes, so job-based
+ * accounting cannot see the pressure: a producer converting decode-ahead
+ * frames maps one fresh buffer per frame and fills the shared 4GB
+ * multimedia domain in seconds, after which every mdp_ion_get_mva fails
+ * and the vendor postproc treats the -EINVAL as fatal (frozen video).
+ * Instead poll the domain's live usage (tracked in pseudo_m4u) and make
+ * submitters back off before the allocator is exhausted.
+ *
+ * Soft tier: above MDP_MM_DOM_SOFT_BYTES sleep up to
+ * MDP_MM_DOM_THROTTLE_MS, then submit anyway (no worse than today).
+ * Hard tier: above MDP_MM_DOM_HARD_BYTES keep sleeping (still
+ * signal-interruptible) - submitting there would fail imminently.
+ * Legit steady-state usage of the domain is a few hundred MB.
+ */
+#define MDP_MM_DOM_SOFT_BYTES	(2560ULL << 20)
+#define MDP_MM_DOM_HARD_BYTES	(3328ULL << 20)
+#define MDP_MM_DOM_THROTTLE_MS	1000
+
+static void mdp_throttle_mm_domain(void)
+{
+	unsigned long deadline = jiffies +
+		msecs_to_jiffies(MDP_MM_DOM_THROTTLE_MS);
+	unsigned long long usage;
+
+	while ((usage = m4u_mm_domain_usage()) > MDP_MM_DOM_SOFT_BYTES) {
+		if (usage < MDP_MM_DOM_HARD_BYTES &&
+			time_after(jiffies, deadline)) {
+			CMDQ_ERR("%s domain at %lluMB, submit anyway\n",
+				__func__, usage >> 20);
+			break;
+		}
+		if (msleep_interruptible(4))
+			break;
+	}
+}
 
 #define SLOT_GROUP_NUM 64
 #define MAX_RB_SLOT_NUM (SLOT_GROUP_NUM*64)
@@ -711,6 +759,10 @@ s32 mdp_ioctl_async_exec(struct file *pf, unsigned long param)
 	struct cmdq_command_buffer cmd_buf;
 	struct mdp_job_mapping *mapping_job = NULL;
 
+	mdp_throttle_mm_domain();
+	/* exclude throttle time from the exec cost metric below */
+	exec_cost = sched_clock();
+
 	CMDQ_TRACE_FORCE_BEGIN("%s\n", __func__);
 
 	mapping_job = kzalloc(sizeof(*mapping_job), GFP_KERNEL);
@@ -804,7 +856,7 @@ s32 mdp_ioctl_async_exec(struct file *pf, unsigned long param)
 	if (status < 0) {
 		CMDQ_ERR("%s translate fail:%d\n", __func__, status);
 		cmdq_task_destroy(handle);
-		kfree(mapping_job);
+		mdp_job_mapping_free(mapping_job);
 		kfree(cmd_buf.va_base);
 		goto done;
 	}
@@ -813,14 +865,14 @@ s32 mdp_ioctl_async_exec(struct file *pf, unsigned long param)
 	if (status < 0) {
 		CMDQ_ERR("%s read_v1 fail:%d\n", __func__, status);
 		cmdq_task_destroy(handle);
-		kfree(mapping_job);
+		mdp_job_mapping_free(mapping_job);
 		kfree(cmd_buf.va_base);
 		goto done;
 	}
 
 	if (cmdq_handle_flush_cmd_buf(handle, &cmd_buf)) {
 		cmdq_task_destroy(handle);
-		kfree(mapping_job);
+		mdp_job_mapping_free(mapping_job);
 		kfree(cmd_buf.va_base);
 		status = -EFAULT;
 		goto done;
@@ -838,7 +890,7 @@ s32 mdp_ioctl_async_exec(struct file *pf, unsigned long param)
 			cmdq_mdp_unlock_thread(handle);
 #endif
 		cmdq_task_destroy(handle);
-		kfree(mapping_job);
+		mdp_job_mapping_free(mapping_job);
 		goto done;
 	}
 
