@@ -241,6 +241,7 @@ struct aw8697 {
 	unsigned int osc_cali_run;
 
 	unsigned char ram_vbat_comp;
+	unsigned int gain_scale;
 	unsigned int vbat;
 	unsigned int lra;
 

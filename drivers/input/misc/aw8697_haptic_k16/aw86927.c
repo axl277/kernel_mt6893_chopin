@@ -1176,6 +1176,7 @@ void aw86927_vibrate_params_init(struct aw86927 *aw86927)
 	pr_info("%s enter!\n", __func__);
 	aw86927->activate_mode = aw86927->info.mode;
 	aw86927->ram_vbat_comp = AW86927_RAM_VBAT_COMP_ENABLE;
+	aw86927->gain_scale = 100;
 	aw86927_i2c_read(aw86927, AW86927_REG_WAVCFG1, &reg_val);
 	aw86927->index = reg_val & 0x7F;
 	aw86927_i2c_read(aw86927, AW86927_REG_PLAYCFG2, &reg_val);
@@ -1502,6 +1503,8 @@ static void aw86927_haptic_set_gain(struct aw86927 *aw86927, unsigned char gain)
 	unsigned char comp_gain = 0;
 
 	pr_debug("%s enter!\n", __func__);
+	/* user strength scale (gain_scale sysfs, percent; 0 = uninitialized) */
+	gain = gain * (aw86927->gain_scale ? aw86927->gain_scale : 100) / 100;
 	if (aw86927->ram_vbat_comp == AW86927_RAM_VBAT_COMP_ENABLE) {
 		aw86927_haptic_get_vbat(aw86927);
 		comp_gain = gain * AW_VBAT_REFER / aw86927->vbat;
@@ -2542,6 +2545,40 @@ static ssize_t aw86927_vmax_store(struct device *dev,
 	return count;
 }
 
+static ssize_t aw86927_gain_scale_show(struct device *dev,
+				       struct device_attribute *attr,
+				       char *buf)
+{
+	struct awinic *awinic = dev_get_drvdata(dev);
+	struct aw86927 *aw86927 = awinic->aw86927;
+
+	return snprintf(buf, PAGE_SIZE, "%u\n",
+			aw86927->gain_scale ? aw86927->gain_scale : 100);
+}
+
+static ssize_t aw86927_gain_scale_store(struct device *dev,
+					struct device_attribute *attr,
+					const char *buf, size_t count)
+{
+	struct awinic *awinic = dev_get_drvdata(dev);
+	struct aw86927 *aw86927 = awinic->aw86927;
+	unsigned int val = 0;
+	int rc = 0;
+
+	rc = kstrtouint(buf, 0, &val);
+	if (rc < 0)
+		return rc;
+	if (val < 1)
+		val = 1;
+	if (val > 100)
+		val = 100;
+
+	mutex_lock(&aw86927->lock);
+	aw86927->gain_scale = val;
+	mutex_unlock(&aw86927->lock);
+	return count;
+}
+
 static ssize_t aw86927_gain_show(struct device *dev,
 				 struct device_attribute *attr, char *buf)
 {
@@ -3263,6 +3300,8 @@ static DEVICE_ATTR(activate_mode, S_IWUSR | S_IRUGO, aw86927_activate_mode_show,
 		   aw86927_activate_mode_store);
 static DEVICE_ATTR(index, S_IWUSR | S_IRUGO, aw86927_index_show,
 		   aw86927_index_store);
+static DEVICE_ATTR(gain_scale, S_IWUSR | S_IRUGO, aw86927_gain_scale_show,
+		   aw86927_gain_scale_store);
 static DEVICE_ATTR(vmax, S_IWUSR | S_IRUGO, aw86927_vmax_show,
 		   aw86927_vmax_store);
 static DEVICE_ATTR(gain, S_IWUSR | S_IRUGO, aw86927_gain_show,
@@ -3318,6 +3357,7 @@ static struct attribute *aw86927_vibrator_attributes[] = {
 	&dev_attr_activate_mode.attr,
 	&dev_attr_index.attr,
 	&dev_attr_vmax.attr,
+	&dev_attr_gain_scale.attr,
 	&dev_attr_gain.attr,
 	&dev_attr_seq.attr,
 	&dev_attr_loop.attr,
@@ -4602,6 +4642,10 @@ void aw86927_haptics_set_gain_work_routine(struct work_struct *work)
 
 	if (aw86927->level < 0x1E)
 		aw86927->level = 0x1E;	/*30 */
+	/* user strength scale; level is recomputed from new_gain on every
+	 * invocation so this never accumulates */
+	aw86927->level = aw86927->level *
+		(aw86927->gain_scale ? aw86927->gain_scale : 100) / 100;
 	pr_info("%s: set_gain queue work, new_gain = %x level = %x\n",
 		__func__, aw86927->new_gain, aw86927->level);
 
