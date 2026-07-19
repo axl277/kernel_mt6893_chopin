@@ -788,6 +788,9 @@ static int aw8697_haptic_set_bst_peak_cur(struct aw8697 *aw8697,
 static int aw8697_haptic_set_gain(struct aw8697 *aw8697, unsigned char gain)
 {
 	unsigned char comp_gain = 0;
+
+	/* user strength scale (gain_scale sysfs, percent; 0 = uninitialized) */
+	gain = gain * (aw8697->gain_scale ? aw8697->gain_scale : 100) / 100;
 	if (aw8697->ram_vbat_comp == AW8697_HAPTIC_RAM_VBAT_COMP_ENABLE)
 	{
 		aw8697_haptic_get_vbat(aw8697);
@@ -2535,6 +2538,7 @@ static int aw8697_haptic_init(struct aw8697 *aw8697)
 	aw8697_haptic_cont_vbat_mode(aw8697,
 				     AW8697_HAPTIC_CONT_VBAT_HW_COMP_MODE);
 	aw8697->ram_vbat_comp = AW8697_HAPTIC_RAM_VBAT_COMP_ENABLE;
+	aw8697->gain_scale = 100;
 
 	mutex_unlock(&aw8697->lock);
 
@@ -3289,6 +3293,10 @@ static void aw8697_haptics_set_gain_work_routine(struct work_struct *work)
 
 	if (aw8697->level < 0x1E)
 		aw8697->level = 0x1E;	/*30 */
+	/* user strength scale; level is recomputed from new_gain on every
+	 * invocation so this never accumulates */
+	aw8697->level = aw8697->level *
+		(aw8697->gain_scale ? aw8697->gain_scale : 100) / 100;
 	pr_info("%s: set_gain queue work, new_gain = %x level = %x \n", __func__,
 		aw8697->new_gain, aw8697->level);
 
@@ -3725,6 +3733,37 @@ static ssize_t aw8697_index_store(struct device *dev,
 	mutex_lock(&aw8697->lock);
 	aw8697->index = val;
 	aw8697_haptic_set_repeat_wav_seq(aw8697, aw8697->index);
+	mutex_unlock(&aw8697->lock);
+	return count;
+}
+
+static ssize_t aw8697_gain_scale_show(struct device *dev,
+				      struct device_attribute *attr, char *buf)
+{
+	struct aw8697 *aw8697 = dev_get_drvdata(dev);
+
+	return snprintf(buf, PAGE_SIZE, "%u\n",
+			aw8697->gain_scale ? aw8697->gain_scale : 100);
+}
+
+static ssize_t aw8697_gain_scale_store(struct device *dev,
+				       struct device_attribute *attr,
+				       const char *buf, size_t count)
+{
+	struct aw8697 *aw8697 = dev_get_drvdata(dev);
+	unsigned int val = 0;
+	int rc = 0;
+
+	rc = kstrtouint(buf, 0, &val);
+	if (rc < 0)
+		return rc;
+	if (val < 1)
+		val = 1;
+	if (val > 100)
+		val = 100;
+
+	mutex_lock(&aw8697->lock);
+	aw8697->gain_scale = val;
 	mutex_unlock(&aw8697->lock);
 	return count;
 }
@@ -4629,6 +4668,8 @@ static DEVICE_ATTR(index, S_IWUSR | S_IRUGO, aw8697_index_show,
 		   aw8697_index_store);
 static DEVICE_ATTR(vmax, S_IWUSR | S_IRUGO, aw8697_vmax_show,
 		   aw8697_vmax_store);
+static DEVICE_ATTR(gain_scale, S_IWUSR | S_IRUGO, aw8697_gain_scale_show,
+		   aw8697_gain_scale_store);
 static DEVICE_ATTR(gain, S_IWUSR | S_IRUGO, aw8697_gain_show,
 		   aw8697_gain_store);
 static DEVICE_ATTR(seq, S_IWUSR | S_IRUGO, aw8697_seq_show, aw8697_seq_store);
@@ -4681,6 +4722,7 @@ static struct attribute *aw8697_vibrator_attributes[] = {
 	&dev_attr_activate_mode.attr,
 	&dev_attr_index.attr,
 	&dev_attr_vmax.attr,
+	&dev_attr_gain_scale.attr,
 	&dev_attr_gain.attr,
 	&dev_attr_seq.attr,
 	&dev_attr_loop.attr,
