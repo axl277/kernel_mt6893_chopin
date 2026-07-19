@@ -2530,6 +2530,13 @@ static ssize_t aw86927_vmax_store(struct device *dev,
 
 	mutex_lock(&aw86927->lock);
 	aw86927->vmax = val;
+	/*
+	 * Playback re-applies bst_vol_ram/bst_vol_rtp on every effect, so a
+	 * bare vmax write only lasts until the next vibration. Fold the
+	 * userspace override into those too, or this knob is inert.
+	 */
+	aw86927->info.bst_vol_ram = val;
+	aw86927->info.bst_vol_rtp = val;
 	aw86927_haptic_set_bst_vol(aw86927, aw86927->vmax);
 	mutex_unlock(&aw86927->lock);
 	return count;
