@@ -705,6 +705,19 @@ static inline void __range_cloexec(struct files_struct *cur_fds,
 static inline void __range_close(struct files_struct *cur_fds, unsigned int fd,
 				 unsigned int max_fd)
 {
+	unsigned n;
+
+	rcu_read_lock();
+	n = last_fd(files_fdtable(cur_fds));
+	rcu_read_unlock();
+
+	/*
+	 * Cap to the last valid index into the fdtable, otherwise a
+	 * close_range(fd, ~0U, 0) loops forever: fd <= UINT_MAX always
+	 * holds and fd++ wraps around, never returning to userspace.
+	 */
+	max_fd = min(max_fd, n);
+
 	while (fd <= max_fd) {
 		struct file *file;
 
