@@ -2464,14 +2464,26 @@ SYSCALL_DEFINE2(clone3, struct clone_args __user *, uargs, size_t, size)
 	unsigned long clone_flags;
 	unsigned long stack, stack_size;
 	int __user *parent_tid, *child_tid;
+	int err;
 
 	if (unlikely(size > PAGE_SIZE))
 		return -E2BIG;
 	if (unlikely(size < CLONE_ARGS_SIZE_VER0))
 		return -EINVAL;
 
-	if (copy_struct_from_user(&args, sizeof(args), uargs, size))
-		return -EFAULT;
+	/*
+	 * Propagate copy_struct_from_user()'s error verbatim. In particular it
+	 * returns -E2BIG when the caller passes a newer, larger struct with a
+	 * field we don't know about set to a non-zero value (e.g. glibc's
+	 * clone_args.cgroup for CLONE_INTO_CGROUP, a 5.7 feature we don't
+	 * implement). glibc/systemd treat that E2BIG as "CLONE_INTO_CGROUP
+	 * unsupported" and retry the spawn without POSIX_SPAWN_SETCGROUP,
+	 * migrating into the target cgroup the classic way. Masking it as
+	 * -EFAULT breaks that fallback and wedges every service spawn.
+	 */
+	err = copy_struct_from_user(&args, sizeof(args), uargs, size);
+	if (err)
+		return err;
 
 	/* exit_signal must have its high bits clear and be a valid signal. */
 	if (unlikely((args.exit_signal & ~((u64)CSIGNAL)) ||
