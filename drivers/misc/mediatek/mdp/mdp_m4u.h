@@ -19,11 +19,16 @@
 #include <soc/mediatek/smi.h>
 #endif
 #include <ion_priv.h>
+#include <linux/types.h>
 
 /* implemented in pseudo_m4u_v2.c: live byte usage of the shared
  * multimedia IOVA domain that MDP ports allocate from
  */
 unsigned long long m4u_mm_domain_usage(void);
+/* ...and the share of it held by one process, so a submitter can be told
+ * whether it is itself the one filling the domain
+ */
+unsigned long long m4u_mm_domain_usage_tgid(pid_t tgid);
 
 void mdp_ion_create(const char *name);
 void mdp_ion_destroy(void);
