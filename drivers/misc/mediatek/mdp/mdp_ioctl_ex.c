@@ -169,9 +169,23 @@ static void mdp_job_mapping_free(struct mdp_job_mapping *mapping_job)
  * Hard tier: above MDP_MM_DOM_HARD_BYTES keep sleeping (still
  * signal-interruptible) - submitting there would fail imminently.
  * Legit steady-state usage of the domain is a few hundred MB.
+ *
+ * Only back off a caller that is itself holding a large share of the
+ * domain. Backing off anyone else is both useless and harmful: the
+ * display pipeline (SurfaceFlinger's RenderEngine, the composer HAL's
+ * dispatcher) submits MDP jobs while holding ~1.5MB, and it is what
+ * releases the buffers the domain is waiting on - sleeping it prevents
+ * the drain that would end the pressure, and stalls composition for the
+ * whole system. Measured: one backgrounded video parks ~1.3GB and pins
+ * the domain over the soft tier indefinitely, after which every display
+ * submit slept a full second and SurfaceFlinger lost ~97% of wall time.
  */
 #define MDP_MM_DOM_SOFT_BYTES	(2560ULL << 20)
 #define MDP_MM_DOM_HARD_BYTES	(3328ULL << 20)
+/* separates a producer (codec2 HAL: hundreds of MB to GBs) from the
+ * display pipeline (a few MB), with orders of magnitude of margin
+ */
+#define MDP_MM_DOM_SELF_BYTES	(512ULL << 20)
 #define MDP_MM_DOM_THROTTLE_MS	1000
 
 static void mdp_throttle_mm_domain(void)
@@ -179,6 +193,9 @@ static void mdp_throttle_mm_domain(void)
 	unsigned long deadline = jiffies +
 		msecs_to_jiffies(MDP_MM_DOM_THROTTLE_MS);
 	unsigned long long usage;
+
+	if (m4u_mm_domain_usage_tgid(current->tgid) < MDP_MM_DOM_SELF_BYTES)
+		return;
 
 	while ((usage = m4u_mm_domain_usage()) > MDP_MM_DOM_SOFT_BYTES) {
 		if (usage < MDP_MM_DOM_HARD_BYTES &&

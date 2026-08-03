@@ -91,6 +91,77 @@ static bool m4u_buf_in_mm_domain(struct m4u_buf_info_t *pList)
 	       pList->mva <= M4U_MM_DOM_END;
 }
 
+/* Per-process share of the domain, so a submitter can be told whether it is
+ * itself the one filling it. The global counter alone cannot distinguish a
+ * runaway producer from the display pipeline: SurfaceFlinger and the composer
+ * HAL also submit MDP jobs, hold only a few MB, and are what DRAINS the
+ * domain (a mapping dies with its ion buffer, which the consumer releases).
+ * Backing THEM off prolongs the pressure and stalls composition, so callers
+ * use this to throttle only processes that actually hold a large share.
+ *
+ * Fixed slot table: the processes that hold MM-domain memory are few
+ * (surfaceflinger, the composer HAL, the codec2 HAL, gralloc, camera), so a
+ * linear scan under a spinlock costs less than a hashtable and cannot fail
+ * to allocate. A process that finds no free slot is simply not accounted,
+ * which makes it look small and therefore exempt - the safe direction, since
+ * the global tier still guards against exhaustion.
+ */
+#define M4U_MM_DOM_TGID_SLOTS	32
+struct m4u_mm_dom_tgid {
+	pid_t tgid;
+	s64 bytes;
+};
+static struct m4u_mm_dom_tgid m4u_mm_dom_tgids[M4U_MM_DOM_TGID_SLOTS];
+static DEFINE_SPINLOCK(m4u_mm_dom_tgid_lock);
+
+static void m4u_mm_domain_account(pid_t tgid, s64 delta)
+{
+	unsigned long flags;
+	int i, free = -1;
+
+	if (!tgid)
+		return;
+
+	spin_lock_irqsave(&m4u_mm_dom_tgid_lock, flags);
+	for (i = 0; i < M4U_MM_DOM_TGID_SLOTS; i++) {
+		if (m4u_mm_dom_tgids[i].tgid == tgid) {
+			m4u_mm_dom_tgids[i].bytes += delta;
+			/* last mapping released: hand the slot back */
+			if (m4u_mm_dom_tgids[i].bytes <= 0)
+				m4u_mm_dom_tgids[i].tgid = 0;
+			goto out;
+		}
+		if (free < 0 && !m4u_mm_dom_tgids[i].tgid)
+			free = i;
+	}
+	if (delta > 0 && free >= 0) {
+		m4u_mm_dom_tgids[free].tgid = tgid;
+		m4u_mm_dom_tgids[free].bytes = delta;
+	}
+out:
+	spin_unlock_irqrestore(&m4u_mm_dom_tgid_lock, flags);
+}
+
+unsigned long long m4u_mm_domain_usage_tgid(pid_t tgid)
+{
+	unsigned long long bytes = 0;
+	unsigned long flags;
+	int i;
+
+	spin_lock_irqsave(&m4u_mm_dom_tgid_lock, flags);
+	for (i = 0; i < M4U_MM_DOM_TGID_SLOTS; i++) {
+		if (m4u_mm_dom_tgids[i].tgid == tgid) {
+			if (m4u_mm_dom_tgids[i].bytes > 0)
+				bytes = m4u_mm_dom_tgids[i].bytes;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&m4u_mm_dom_tgid_lock, flags);
+
+	return bytes;
+}
+EXPORT_SYMBOL(m4u_mm_domain_usage_tgid);
+
 static LIST_HEAD(pseudo_sglist);
 /* this is the mutex lock to protect mva_sglist->list*/
 static spinlock_t pseudo_list_lock;
@@ -1328,8 +1399,13 @@ static int pseudo_client_add_buf(struct m4u_client_t *client,
 {
 	mutex_lock(&(client->dataMutex));
 	list_add(&(pList->link), &(client->mvaList));
-	if (m4u_buf_in_mm_domain(pList))
+	if (m4u_buf_in_mm_domain(pList)) {
 		atomic64_add(pList->size, &m4u_mm_dom_bytes);
+		/* pList->pid is task_pid_nr(current->group_leader), i.e. the
+		 * tgid, stamped by the caller before it hands the buffer over
+		 */
+		m4u_mm_domain_account(pList->pid, pList->size);
+	}
 	mutex_unlock(&(client->dataMutex));
 
 	return 0;
@@ -1372,9 +1448,15 @@ static struct m4u_buf_info_t *pseudo_client_find_buf(
 	} else {
 		if (del) {
 			list_del(pListHead);
-			if (m4u_buf_in_mm_domain(pList))
+			if (m4u_buf_in_mm_domain(pList)) {
 				atomic64_sub(pList->size,
 					     &m4u_mm_dom_bytes);
+				/* charge back to the mapper, which need not
+				 * be the process doing the release
+				 */
+				m4u_mm_domain_account(pList->pid,
+						      -(s64)pList->size);
+			}
 		}
 		ret = pList;
 	}
