@@ -11,6 +11,7 @@
 #ifndef _LINUX_SYSCALLS_H
 #define _LINUX_SYSCALLS_H
 
+struct clone_args;
 struct epoll_event;
 struct iattr;
 struct inode;
@@ -888,6 +889,7 @@ asmlinkage long sys_clone(unsigned long, unsigned long, int __user *,
 	       int __user *, unsigned long);
 #endif
 #endif
+asmlinkage long sys_clone3(struct clone_args __user *, size_t);
 
 asmlinkage long sys_execve(const char __user *filename,
 		const char __user *const __user *argv,
