@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# Compile script for Hydrogen kernel (ReSukiSU Integrated)
-# Brought to you by rio004
+#
+#
 #
 
 # Date/Time
@@ -11,7 +11,7 @@ DATE=$(date '+%Y%m%d-%H%M')
 # Device
 DEVICE="${1:-chopin}"
 DEFCONFIG="${DEVICE}_defconfig"
-ZIPNAME="HydrogenKernel-${DEVICE}-${DATE}.zip"
+ZIPNAME="Artic-Kernel-${DEVICE}-${DATE}.zip"
 
 echo -e "Building for: $DEVICE\n"
 
@@ -33,7 +33,7 @@ for arg in "$@"; do
     case $arg in
         -c) CLEAN_BUILD=true ;;
         -ksu) INCLUDE_KSU=true
-              ZIPNAME="HydrogenKernel-ReSukiSU-${DEVICE}-${DATE}.zip"
+              ZIPNAME="Artic-Kernel-ReSukiSU-${DEVICE}-${DATE}.zip"
               ;;
     esac
 done
