@@ -21,6 +21,10 @@
 #include <linux/mount.h>
 #include <linux/fs.h>
 #include "internal.h"
+#ifdef CONFIG_SUSFS
+#include <linux/susfs.h>
+#endif
+
 
 #include <linux/uaccess.h>
 #include <asm/unistd.h>
@@ -432,6 +436,11 @@ EXPORT_SYMBOL(kernel_read);
 ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 {
 	ssize_t ret;
+	
+#ifdef CONFIG_SUSFS
+	if (susfs_is_sus_ino(file_inode(file)))
+		return -ENOENT;
+#endif
 
 	if (!(file->f_mode & FMODE_READ))
 		return -EBADF;
@@ -530,6 +539,11 @@ EXPORT_SYMBOL(kernel_write);
 ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_t *pos)
 {
 	ssize_t ret;
+	
+#ifdef CONFIG_SUSFS
+	if (susfs_is_sus_ino(file_inode(file)))
+		return -ENOENT;
+#endif
 
 	if (!(file->f_mode & FMODE_WRITE))
 		return -EBADF;
