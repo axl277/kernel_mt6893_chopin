@@ -87,7 +87,6 @@ int vfs_getattr_nosec(const struct path *path, struct kstat *stat,
 	{
 		int err = inode->i_op->getattr(path, stat, request_mask,
 					    query_flags);
-#endif
 		if (!err)
 			susfs_sus_kstat_spoof_generic_fillattr(inode, stat);
 		return err;
@@ -95,6 +94,7 @@ int vfs_getattr_nosec(const struct path *path, struct kstat *stat,
 #else
 		return inode->i_op->getattr(path, stat, request_mask,
 					    query_flags);
+#endif
 
 	generic_fillattr(inode, stat);
 	return 0;
