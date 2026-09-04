@@ -48,6 +48,7 @@
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/namei.h>
+
 #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 extern bool susfs_is_inode_sus_path(struct inode *inode);
 extern const struct qstr susfs_fake_qstr_name;
@@ -538,7 +539,7 @@ struct nameidata {
 	struct path	root;
 	struct inode	*inode; /* path.dentry.d_inode */
 	unsigned int	flags;
-	#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
 	unsigned int	state;
 #endif
 	unsigned	seq, m_seq;
@@ -567,7 +568,7 @@ static void set_nameidata(struct nameidata *p, int dfd, struct filename *name)
 	p->total_link_count = old ? old->total_link_count : 0;
 	p->saved = old;
 	current->nameidata = p;
-	#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
 	p->state = 0;
 #endif
 }
@@ -1647,7 +1648,7 @@ static struct dentry *lookup_dcache(const struct qstr *name,
 			return ERR_PTR(error);
 		}
 	}
-	#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+#ifdef CONFIG_KSU_SUSFS_SUS_PATH
 	if (dentry && !IS_ERR(dentry) && dentry->d_inode && susfs_is_inode_sus_path(dentry->d_inode)) {
 		if (d_in_lookup(dentry))
 			d_lookup_done(dentry);
@@ -1680,7 +1681,7 @@ static struct dentry *lookup_real(struct inode *dir, struct dentry *dentry,
 		dput(dentry);
 		dentry = old;
 	}
-	
+
 	return dentry;
 }
 
@@ -1707,6 +1708,7 @@ retry:
 #endif
 	if (unlikely(!dentry))
 		return ERR_PTR(-ENOMEM);
+
 #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 	dentry = lookup_real(base->d_inode, dentry, flags);
 
@@ -1908,7 +1910,7 @@ retry:
 		found_sus_path = true;
 		goto retry;
 	}
-+#endif
+#endif
 out:
 	inode_unlock_shared(inode);
 	return dentry;
@@ -3873,7 +3875,7 @@ static int do_o_path(struct nameidata *nd, unsigned flags, struct file *file)
 		error = vfs_open(&path, file);
 		path_put(&path);
 	}
-+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
 	if (fake_filename && !IS_ERR(fake_filename))
 		putname(fake_filename);
 #endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
@@ -3950,7 +3952,7 @@ static struct file *path_openat(struct nameidata *nd,
 				}
 			}
 		}
-#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIREC
+#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
 	terminate_walk(nd);
 out2:
 	if (!(opened & FILE_OPENED)) {
@@ -5207,7 +5209,7 @@ int vfs_readlink(struct dentry *dentry, char __user *buffer, int buflen)
 		}
 #else
 			return inode->i_op->readlink(dentry, buffer, buflen);
-+#endif
+#endif
 
 		if (!d_is_symlink(dentry))
 			return -EINVAL;
