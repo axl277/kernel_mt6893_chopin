@@ -93,7 +93,7 @@ int vfs_statfs(const struct path *path, struct kstatfs *buf)
 			goto orig_flow;
 		return 0;
 	}
-+#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
 
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 	if (likely(susfs_is_current_proc_umounted() && path->mnt)) {
