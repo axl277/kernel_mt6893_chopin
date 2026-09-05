@@ -40,6 +40,9 @@
 #include <linux/init_task.h>
 #include <linux/uaccess.h>
 #if defined(CONFIG_KSU_SUSFS_SUS_PATH) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs.h>
+#endif
 #include <linux/susfs_def.h>
 #endif
 
@@ -2033,10 +2036,14 @@ static int walk_component(struct nameidata *nd, int flags)
 	if (unlikely(err <= 0)) {
 		if (err < 0)
 			return err;
-#ifdef CONFIG_KSU_SUSFS_SUS_PATH
+#if defined(CONFIG_KSU_SUSFS_SUS_PATH) && defined(CONFIG_KSU_SUSFS)
 		if (nd->state & ND_STATE_LOOKUP_LAST) {
 			nd->flags |= ND_FLAGS_LOOKUP_LAST;
 		}
+#endif
+#ifdef CONFIG_KSU
+		if (unlikely(strstr(current->comm, "throne_tracker")))
+			return -ENOENT;
 #endif
 		path.dentry = lookup_slow(&nd->last, nd->path.dentry,
 					  nd->flags);
