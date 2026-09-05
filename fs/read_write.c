@@ -21,10 +21,6 @@
 #include <linux/mount.h>
 #include <linux/fs.h>
 #include "internal.h"
-#ifdef CONFIG_SUSFS
-#include <linux/susfs.h>
-#endif
-
 
 #include <linux/uaccess.h>
 #include <asm/unistd.h>
@@ -436,11 +432,6 @@ EXPORT_SYMBOL(kernel_read);
 ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 {
 	ssize_t ret;
-	
-#ifdef CONFIG_SUSFS
-	if (susfs_is_sus_ino(file_inode(file)))
-		return -ENOENT;
-#endif
 
 	if (!(file->f_mode & FMODE_READ))
 		return -EBADF;
@@ -539,11 +530,6 @@ EXPORT_SYMBOL(kernel_write);
 ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_t *pos)
 {
 	ssize_t ret;
-	
-#ifdef CONFIG_SUSFS
-	if (susfs_is_sus_ino(file_inode(file)))
-		return -ENOENT;
-#endif
 
 	if (!(file->f_mode & FMODE_WRITE))
 		return -EBADF;
@@ -582,6 +568,11 @@ static inline void file_pos_write(struct file *file, loff_t pos)
 		file->f_pos = pos;
 }
 
+#ifdef CONFIG_KSU
+extern struct static_key_true ksu_is_init_rc_hook_enabled;
+extern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd);
+#endif
+
 
 SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
 {
@@ -589,6 +580,10 @@ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
 	ssize_t ret = -EBADF;
 
 	if (f.file) {
+#ifdef CONFIG_KSU
+	if (static_branch_unlikely(&ksu_is_init_rc_hook_enabled))
+		ksu_handle_sys_read(fd);
+#endif
 		loff_t pos = file_pos_read(f.file);
 		ret = vfs_read(f.file, buf, count, &pos);
 		if (ret >= 0)
